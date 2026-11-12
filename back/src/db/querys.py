@@ -1,0 +1,408 @@
+unifyDataFrameQuery = """
+    WITH fechas AS (
+	SELECT DISTINCT dv.creacion
+	FROM detalle_ventas dv
+	INNER JOIN ventas v 
+		ON v.id_venta = dv.id_venta
+	WHERE v.id_sucursal = :id_sucursal
+    ),
+    feriados AS (
+        SELECT DISTINCT 
+            f.fecha,
+            tf.tipo,
+            f.nombre
+        FROM feriado f
+        INNER JOIN tipo_feriado tf 
+            ON tf.id_tipo_feriado = f.tipo
+    )
+    SELECT
+        p.nombre,
+        f.creacion,
+        COALESCE(SUM(dv.cantidad), 0) AS cantidad_vendida,
+        c.temp_avg,
+        c.temp_min,
+        c.temp_max,
+        c.humedad,
+        c.lluvia,
+        c.viento,
+        c.presion,
+        c.nubosidad,
+        COALESCE(fer.tipo, '-') AS tipo_feriado,
+        COALESCE(fer.nombre, '-') AS feriado
+    FROM productos p
+    CROSS JOIN fechas f
+    LEFT JOIN detalle_ventas dv 
+        ON dv.id_producto = p.id_producto
+        AND dv.creacion = f.creacion
+    LEFT JOIN ventas v
+        ON v.id_venta = dv.id_venta
+        AND v.id_sucursal = :id_sucursal
+    LEFT JOIN clima c
+        ON c.fecha = f.creacion
+    LEFT JOIN feriados fer 
+        ON fer.fecha = f.creacion
+    WHERE p.id_sucursal = :id_sucursal
+    GROUP BY 
+        p.nombre,
+        f.creacion,
+        c.temp_avg,
+        c.temp_min,
+        c.temp_max,
+        c.humedad,
+        c.lluvia,
+        c.viento,
+        c.presion,
+        c.nubosidad,
+        fer.tipo,
+        fer.nombre
+    ORDER BY f.creacion, p.nombre
+"""
+
+getDBLastYearQuery = "SELECT MAX(EXTRACT(YEAR FROM creacion)) FROM ventas"
+
+getDBProducts = """
+    SELECT id_producto, nombre
+    FROM productos
+    WHERE id_sucursal = :id_sucursal
+    ORDER BY id_producto;
+"""
+
+getDBFeriados = """
+    SELECT DISTINCT ON (fer.fecha)
+        fer.fecha,
+        fer.nombre,
+        tf.tipo
+    FROM feriado fer
+    INNER JOIN tipo_feriado tf 
+        ON fer.tipo = tf.id_tipo_feriado
+    ORDER BY 
+        fer.fecha,
+        CASE WHEN tf.tipo = 'efemeride' THEN 1 ELSE 2 END;
+"""
+
+getTopSoldProductsQuery = """
+    SELECT
+        p.nombre AS nombre,
+        COALESCE(SUM(dv.cantidad), 0) AS total_vendido
+    FROM detalle_ventas dv
+    INNER JOIN productos as p
+    ON p.id_producto = dv.id_producto
+    INNER JOIN ventas v
+        ON v.id_venta = dv.id_venta
+    WHERE (dv.cancelada IS NULL OR dv.cancelada = FALSE)
+    AND (dv.activo IS NULL OR dv.activo = TRUE)
+    AND v.id_sucursal = :id_sucursal
+    AND (:start_date IS NULL OR v.creacion::date >= CAST(:start_date AS DATE))
+    AND (:end_date IS NULL OR v.creacion::date <= CAST(:end_date AS DATE))
+    GROUP BY p.nombre
+    ORDER BY total_vendido DESC
+    LIMIT :limit;
+"""
+
+listSucursalesAllQuery = """
+    SELECT id_sucursal, nombre, activo, creacion, actualizacion
+    FROM sucursal
+    ORDER BY id_sucursal;
+"""
+
+listSucursalesActivasQuery = """
+    SELECT id_sucursal, nombre, activo, creacion, actualizacion
+    FROM sucursal
+    WHERE activo = true
+    ORDER BY id_sucursal;
+"""
+
+createSucursalQuery = """
+    INSERT INTO sucursal (nombre, creacion, actualizacion, activo)
+    VALUES (:nombre, NOW(), NOW(), true)
+    RETURNING id_sucursal;
+"""
+
+updateSucursalNombreQuery = """
+    UPDATE sucursal
+    SET nombre = :nombre,
+        actualizacion = NOW()
+    WHERE id_sucursal = :id;
+"""
+
+updateSucursalActivoQuery = """
+    UPDATE sucursal
+    SET activo = :activo,
+        actualizacion = NOW()
+    WHERE id_sucursal = :id;
+"""
+
+getSucursalLastTrainingDateQuery = """
+    SELECT ultima_fecha_entrenamiento
+    FROM sucursal
+    WHERE id_sucursal = :id_sucursal;
+"""
+
+updateSucursalLastTrainingDateQuery = """
+    UPDATE sucursal
+    SET ultima_fecha_entrenamiento = :ultima_fecha_entrenamiento,
+        actualizacion = NOW()
+    WHERE id_sucursal = :id_sucursal;
+"""
+
+getTopProfitableProductsQuery = """
+    SELECT
+        p.nombre AS nombre,
+        COALESCE(SUM(dv.cantidad * (COALESCE(dv.precio, 0) - COALESCE(dv.costo, 0))), 0) AS total_ganancia
+    FROM detalle_ventas dv
+    INNER JOIN productos AS p
+        ON p.id_producto = dv.id_producto
+    INNER JOIN ventas v
+        ON v.id_venta = dv.id_venta
+    WHERE (dv.cancelada IS NULL OR dv.cancelada = FALSE)
+        AND (dv.activo IS NULL OR dv.activo = TRUE)
+        AND v.id_sucursal = :id_sucursal
+        AND (:start_date IS NULL OR v.creacion::date >= CAST(:start_date AS DATE))
+        AND (:end_date IS NULL OR v.creacion::date <= CAST(:end_date AS DATE))
+    GROUP BY p.nombre
+    ORDER BY total_ganancia DESC
+    LIMIT :limit;
+"""
+
+getWeatherImpactIncomeQuery = """
+    SELECT
+        TO_CHAR(v.creacion, 'YYYY-MM') AS mes,
+        COALESCE(
+            SUM(CASE WHEN COALESCE(c.lluvia, 0) > 0 THEN COALESCE(v.total, 0) ELSE 0 END)
+            / NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(c.lluvia, 0) > 0 THEN v.creacion END), 0),
+            0
+        ) AS ingreso_lluvioso,
+        COALESCE(
+            SUM(CASE WHEN COALESCE(c.lluvia, 0) = 0 AND COALESCE(c.nubosidad, 0) <= 30 THEN COALESCE(v.total, 0) ELSE 0 END)
+            / NULLIF(COUNT(DISTINCT CASE WHEN COALESCE(c.lluvia, 0) = 0 AND COALESCE(c.nubosidad, 0) <= 30 THEN v.creacion END), 0),
+            0
+        ) AS ingreso_despejado
+    FROM ventas v
+    INNER JOIN clima c
+        ON c.fecha = v.creacion
+    WHERE (v.activo IS NULL OR v.activo = TRUE)
+        AND v.id_sucursal = :id_sucursal
+        AND (:start_date IS NULL OR v.creacion::date >= CAST(:start_date AS DATE))
+        AND (:end_date IS NULL OR v.creacion::date <= CAST(:end_date AS DATE))
+    GROUP BY TO_CHAR(v.creacion, 'YYYY-MM'), EXTRACT(YEAR FROM v.creacion), EXTRACT(MONTH FROM v.creacion)
+    ORDER BY EXTRACT(YEAR FROM v.creacion), EXTRACT(MONTH FROM v.creacion);
+"""
+
+getCalendarImpactIncomeQuery = """
+    WITH ventas_diarias AS (
+        SELECT
+            v.creacion::date AS fecha,
+            COALESCE(SUM(v.total), 0) AS ingreso_dia
+        FROM ventas v
+        WHERE (v.activo IS NULL OR v.activo = TRUE)
+            AND v.id_sucursal = :id_sucursal
+            AND (:start_date IS NULL OR v.creacion::date >= CAST(:start_date AS DATE))
+            AND (:end_date IS NULL OR v.creacion::date <= CAST(:end_date AS DATE))
+        GROUP BY v.creacion::date
+    ),
+    clasificacion_dias AS (
+        SELECT
+            vd.fecha,
+            vd.ingreso_dia,
+            CASE
+                WHEN f.fecha IS NOT NULL THEN 'festivo'
+                WHEN EXTRACT(ISODOW FROM vd.fecha) IN (6, 7) THEN 'fin_semana'
+                ELSE 'normal'
+            END AS tipo_dia
+        FROM ventas_diarias vd
+        LEFT JOIN feriado f
+            ON f.fecha = vd.fecha
+            AND (f.activo IS NULL OR f.activo = TRUE)
+    )
+    SELECT
+        TO_CHAR(cd.fecha, 'YYYY-MM') AS mes,
+        COALESCE(
+            SUM(CASE WHEN cd.tipo_dia = 'festivo' THEN cd.ingreso_dia ELSE 0 END)
+            / NULLIF(COUNT(CASE WHEN cd.tipo_dia = 'festivo' THEN 1 END), 0),
+            0
+        ) AS ingreso_festivo,
+        COALESCE(
+            SUM(CASE WHEN cd.tipo_dia = 'normal' THEN cd.ingreso_dia ELSE 0 END)
+            / NULLIF(COUNT(CASE WHEN cd.tipo_dia = 'normal' THEN 1 END), 0),
+            0
+        ) AS ingreso_normal,
+        COALESCE(
+            SUM(CASE WHEN cd.tipo_dia = 'fin_semana' THEN cd.ingreso_dia ELSE 0 END)
+            / NULLIF(COUNT(CASE WHEN cd.tipo_dia = 'fin_semana' THEN 1 END), 0),
+            0
+        ) AS ingreso_fin_semana
+    FROM clasificacion_dias cd
+    GROUP BY TO_CHAR(cd.fecha, 'YYYY-MM'), EXTRACT(YEAR FROM cd.fecha), EXTRACT(MONTH FROM cd.fecha)
+    ORDER BY EXTRACT(YEAR FROM cd.fecha), EXTRACT(MONTH FROM cd.fecha);
+"""
+
+getCalendarUpliftQuery = """
+    WITH ventas_diarias AS (
+        SELECT
+            v.creacion::date AS fecha,
+            COALESCE(SUM(v.total), 0) AS ingreso_dia
+        FROM ventas v
+        WHERE (v.activo IS NULL OR v.activo = TRUE)
+            AND v.id_sucursal = :id_sucursal
+            AND (:start_date IS NULL OR v.creacion::date >= CAST(:start_date AS DATE))
+            AND (:end_date IS NULL OR v.creacion::date <= CAST(:end_date AS DATE))
+        GROUP BY v.creacion::date
+    ),
+    clasificacion_dias AS (
+        SELECT
+            vd.fecha,
+            vd.ingreso_dia,
+            CASE
+                WHEN f.fecha IS NOT NULL THEN 'festivo'
+                WHEN EXTRACT(ISODOW FROM vd.fecha) IN (6, 7) THEN 'fin_semana'
+                ELSE 'normal'
+            END AS tipo_dia
+        FROM ventas_diarias vd
+        LEFT JOIN feriado f
+            ON f.fecha = vd.fecha
+            AND (f.activo IS NULL OR f.activo = TRUE)
+    ),
+    promedios AS (
+        SELECT
+            COALESCE(AVG(CASE WHEN tipo_dia = 'normal' THEN ingreso_dia END), 0) AS ingreso_normal,
+            COALESCE(AVG(CASE WHEN tipo_dia = 'festivo' THEN ingreso_dia END), 0) AS ingreso_festivo,
+            COALESCE(AVG(CASE WHEN tipo_dia = 'fin_semana' THEN ingreso_dia END), 0) AS ingreso_fin_semana
+        FROM clasificacion_dias
+    )
+    SELECT
+        COALESCE(((ingreso_festivo - ingreso_normal) / NULLIF(ingreso_normal, 0)) * 100, 0) AS incremento_feriado,
+        COALESCE(((ingreso_fin_semana - ingreso_normal) / NULLIF(ingreso_normal, 0)) * 100, 0) AS incremento_fin_semana
+    FROM promedios;
+"""
+getCategoryProfitabilityQuery = """
+    SELECT
+        COALESCE(NULLIF(TRIM(p.categoria), ''), 'Sin categoria') AS categoria,
+        COALESCE(
+            SUM(
+                COALESCE(dv.cantidad, 0) *
+                (COALESCE(dv.precio, 0) - COALESCE(dv.costo, 0))
+            ),
+            0
+        ) AS total_ganancia
+    FROM detalle_ventas dv
+    INNER JOIN productos p
+        ON p.id_producto = dv.id_producto
+    INNER JOIN ventas v
+        ON v.id_venta = dv.id_venta
+    WHERE (dv.cancelada IS NULL OR dv.cancelada = FALSE)
+        AND (dv.activo IS NULL OR dv.activo = TRUE)
+        AND v.id_sucursal = :id_sucursal
+        AND (:start_date IS NULL OR v.creacion::date >= CAST(:start_date AS DATE))
+        AND (:end_date IS NULL OR v.creacion::date <= CAST(:end_date AS DATE))
+    GROUP BY COALESCE(NULLIF(TRIM(p.categoria), ''), 'Sin categoria')
+    ORDER BY total_ganancia DESC;
+"""
+
+getProcessedDataSummaryQuery = """
+    SELECT
+        COALESCE(COUNT(v.id_venta), 0) AS sales_rows,
+        COALESCE(COUNT(DISTINCT v.creacion::date), 0) AS sales_days,
+        COALESCE(SUM(v.total), 0) AS total_income,
+        MIN(v.creacion::date) AS first_sale_date,
+        MAX(v.creacion::date) AS last_sale_date,
+        COALESCE((
+            SELECT COUNT(*)
+            FROM productos p
+            WHERE p.id_sucursal = :id_sucursal
+        ), 0) AS products_rows,
+        COALESCE((
+            SELECT COUNT(*)
+            FROM detalle_ventas dv
+            INNER JOIN ventas v2
+                ON v2.id_venta = dv.id_venta
+            WHERE v2.id_sucursal = :id_sucursal
+        ), 0) AS sale_detail_rows
+    FROM ventas v
+    WHERE (v.activo IS NULL OR v.activo = TRUE)
+        AND v.id_sucursal = :id_sucursal;
+"""
+
+getProcessedDataCategoriesQuery = """
+    SELECT
+        COALESCE(NULLIF(TRIM(p.categoria), ''), 'Sin categoria') AS category,
+        COUNT(*) AS products_count
+    FROM productos p
+    WHERE p.id_sucursal = :id_sucursal
+    GROUP BY COALESCE(NULLIF(TRIM(p.categoria), ''), 'Sin categoria')
+    ORDER BY products_count DESC, category ASC
+    LIMIT 6;
+"""
+
+getProcessedDataRecentSalesQuery = """
+    SELECT
+        v.id_venta,
+        v.creacion::date AS sale_date,
+        COALESCE(v.total, 0) AS total,
+        COALESCE(v.tipo, '-') AS sale_type
+    FROM ventas v
+    WHERE (v.activo IS NULL OR v.activo = TRUE)
+        AND v.id_sucursal = :id_sucursal
+    ORDER BY v.creacion DESC, v.id_venta DESC
+    LIMIT 8;
+"""
+
+getProcessedDataProductsCatalogQuery = """
+    SELECT
+        p.id_producto,
+        p.nombre AS product_name,
+        COALESCE(NULLIF(TRIM(p.categoria), ''), 'Sin categoria') AS category
+    FROM productos p
+    WHERE p.id_sucursal = :id_sucursal
+    ORDER BY category ASC, product_name ASC;
+"""
+
+getProcessedSalesByDateRangeQuery = """
+    SELECT
+        v.id_venta,
+        v.creacion::date AS sale_date,
+        COALESCE(v.total, 0) AS total,
+        COALESCE(v.tipo, '-') AS sale_type
+    FROM ventas v
+    WHERE (v.activo IS NULL OR v.activo = TRUE)
+        AND v.id_sucursal = :id_sucursal
+        AND (:start_date IS NULL OR v.creacion::date >= :start_date)
+        AND (:end_date IS NULL OR v.creacion::date <= :end_date)
+    ORDER BY v.creacion DESC, v.id_venta DESC
+    LIMIT :limit;
+"""
+
+getSaleDetailBySaleIdQuery = """
+    SELECT
+        dv.id_detalle,
+        dv.id_producto,
+        COALESCE(p.nombre, '-') AS product_name,
+        COALESCE(NULLIF(TRIM(p.categoria), ''), 'Sin categoria') AS category,
+        COALESCE(dv.cantidad, 0) AS quantity,
+        COALESCE(dv.precio, 0) AS unit_price,
+        COALESCE(dv.costo, 0) AS unit_cost,
+        COALESCE(dv.cancelada, FALSE) AS cancelled,
+        COALESCE(dv.cantidad, 0) * COALESCE(dv.precio, 0) AS subtotal,
+        COALESCE(dv.cantidad, 0) * (COALESCE(dv.precio, 0) - COALESCE(dv.costo, 0)) AS profit
+    FROM detalle_ventas dv
+    INNER JOIN ventas v
+        ON v.id_venta = dv.id_venta
+    LEFT JOIN productos p
+        ON p.id_producto = dv.id_producto
+    WHERE v.id_sucursal = :id_sucursal
+        AND v.id_venta = :id_venta
+    ORDER BY dv.id_detalle ASC;
+"""
+
+getTotalIncomeKpiQuery = """
+    SELECT
+        COALESCE(SUM(v.total), 0) AS total_income,
+        COALESCE(COUNT(*), 0) AS total_sales,
+        COALESCE(COUNT(DISTINCT v.creacion::date), 0) AS sales_days,
+        COALESCE(
+            SUM(v.total) / NULLIF(COUNT(DISTINCT v.creacion::date), 0),
+            0
+        ) AS avg_daily_income
+    FROM ventas v
+    WHERE (v.activo IS NULL OR v.activo = TRUE)
+        AND v.id_sucursal = :id_sucursal;
+"""
